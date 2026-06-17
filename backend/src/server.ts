@@ -1,36 +1,214 @@
 import express from "express";
 import cors from "cors";
-import { createTransport } from "nodemailer";
+import nodemailer from "nodemailer";
+import dotenv from "dotenv";
+import dns from "dns";
+
+dotenv.config();
+
+dns.setDefaultResultOrder("ipv4first");
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
 
-const transporter = createTransport({
-  host: "smtp.gmail.com",
-  port: 587,
-  secure: false,
-  family: 4,
-  auth: {
-    user: "04sharadkumar@gmail.com",
-    pass: "xtml jnfg otqc lwps",
+const EMAIL_USER = process.env.EMAIL_USER!;
+const EMAIL_PASS = process.env.EMAIL_PASS!;
+
+if (!EMAIL_USER || !EMAIL_PASS) {
+  throw new Error("EMAIL_USER and EMAIL_PASS are required in .env");
+}
+
+const TIMEOUT = 15000;
+
+const smtpMethods = [
+  {
+    name: "Gmail 587 STARTTLS IPv4",
+    config: {
+      host: "smtp.gmail.com",
+      port: 587,
+      secure: false,
+      requireTLS: true,
+      family: 4,
+    },
   },
-  connectionTimeout: 60000,
-  greetingTimeout: 60000,
-  socketTimeout: 60000,
-} as any);
+  {
+    name: "Gmail 465 SSL IPv4",
+    config: {
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true,
+      family: 4,
+    },
+  },
+  {
+    name: "Gmail 587 STARTTLS default DNS",
+    config: {
+      host: "smtp.gmail.com",
+      port: 587,
+      secure: false,
+      requireTLS: true,
+    },
+  },
+  {
+    name: "Gmail 465 SSL default DNS",
+    config: {
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true,
+    },
+  },
+  {
+    name: "Gmail 587 TLS min v1.2 IPv4",
+    config: {
+      host: "smtp.gmail.com",
+      port: 587,
+      secure: false,
+      requireTLS: true,
+      family: 4,
+      tls: {
+        minVersion: "TLSv1.2",
+      },
+    },
+  },
+  {
+    name: "Gmail 465 TLS min v1.2 IPv4",
+    config: {
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true,
+      family: 4,
+      tls: {
+        minVersion: "TLSv1.2",
+      },
+    },
+  },
+  {
+    name: "Gmail 587 rejectUnauthorized false IPv4",
+    config: {
+      host: "smtp.gmail.com",
+      port: 587,
+      secure: false,
+      requireTLS: true,
+      family: 4,
+      tls: {
+        rejectUnauthorized: false,
+      },
+    },
+  },
+  {
+    name: "Gmail 465 rejectUnauthorized false IPv4",
+    config: {
+      host: "smtp.gmail.com",
+      port: 465,
+      secure: true,
+      family: 4,
+      tls: {
+        rejectUnauthorized: false,
+      },
+    },
+  },
+];
+
+function withTimeout<T>(promise: Promise<T>, ms: number, methodName: string) {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => {
+      setTimeout(() => {
+        reject(new Error(`${methodName} timeout after ${ms / 1000} sec`));
+      }, ms);
+    }),
+  ]);
+}
+
+function createTransporter(config: any) {
+  return nodemailer.createTransport({
+    ...config,
+    auth: {
+      user: EMAIL_USER,
+      pass: EMAIL_PASS,
+    },
+    connectionTimeout: TIMEOUT,
+    greetingTimeout: TIMEOUT,
+    socketTimeout: TIMEOUT,
+    pool: false,
+    logger: true,
+    debug: false,
+  });
+}
+
+async function verifyTransporter(method: any) {
+  const transporter = createTransporter(method.config);
+
+  await withTimeout(
+    transporter.verify(),
+    TIMEOUT,
+    `${method.name} verify`
+  );
+
+  return transporter;
+}
+
+async function sendMailWithFallback(mailOptions: any) {
+  const errors: any[] = [];
+
+  for (const method of smtpMethods) {
+    try {
+      console.log("=======================================");
+      console.log(`Trying method: ${method.name}`);
+
+      const transporter = await verifyTransporter(method);
+
+      const info = await withTimeout(
+        transporter.sendMail(mailOptions),
+        TIMEOUT,
+        `${method.name} sendMail`
+      );
+
+      console.log(`SUCCESS: Mail sent using ${method.name}`);
+
+      return {
+        success: true,
+        method: method.name,
+        messageId: info.messageId,
+        accepted: info.accepted,
+        rejected: info.rejected,
+        previousErrors: errors,
+      };
+    } catch (error: any) {
+      console.log(`FAILED: ${method.name}`);
+      console.log(error.message);
+
+      errors.push({
+        method: method.name,
+        message: error.message,
+        code: error.code || null,
+        command: error.command || null,
+        address: error.address || null,
+        port: error.port || null,
+      });
+    }
+  }
+
+  return {
+    success: false,
+    message: "All SMTP methods failed",
+    errors,
+  };
+}
 
 app.get("/", (_req, res) => {
   res.json({
     success: true,
-    message: "Gmail Nodemailer test server running",
+    message: "Advanced Gmail Nodemailer fallback server running",
+    totalMethods: smtpMethods.length,
   });
 });
 
 app.post("/api/send-mail", async (req, res) => {
   try {
-    const { email } = req.body;
+    const { email, subject, message } = req.body;
 
     if (!email) {
       return res.status(400).json({
@@ -39,36 +217,41 @@ app.post("/api/send-mail", async (req, res) => {
       });
     }
 
-    const info = await transporter.sendMail({
-      from: '"Sharad Kumar" <04sharadkumar@gmail.com>',
+    const result = await sendMailWithFallback({
+      from: `"Sharad Kumar" <${EMAIL_USER}>`,
       to: email,
-      subject: "Greetings From Sharad",
+      subject: subject || "Greetings From Sharad",
       html: `
-        <div style="font-family:Arial;padding:20px">
-          <h2>Hello 👋</h2>
-          <p>Hello from Sharad's side.</p>
-          <p>Have a great evening for you 🌙</p>
-          <br/>
-          <p>Best Regards,</p>
-          <strong>Sharad Kumar</strong>
+        <div style="font-family:Arial;padding:20px;background:#f8fafc">
+          <div style="max-width:500px;margin:auto;background:white;padding:24px;border-radius:12px">
+            <h2 style="color:#2563eb;margin-top:0">Hello 👋</h2>
+            <p>${message || "Hello from Sharad's side."}</p>
+            <p>Have a great evening for you 🌙</p>
+            <br/>
+            <p>Best Regards,</p>
+            <strong>Sharad Kumar</strong>
+          </div>
         </div>
       `,
-      text: "Hello from Sharad's side. Have a great evening for you.",
+      text: message || "Hello from Sharad's side. Have a great evening for you.",
     });
+
+    if (!result.success) {
+      return res.status(500).json(result);
+    }
 
     return res.status(200).json({
       success: true,
       message: "Mail sent successfully",
-      messageId: info.messageId,
+      ...result,
     });
   } catch (error: any) {
-    console.error("MAIL ERROR:", error);
+    console.error("MAIN ERROR:", error);
 
     return res.status(500).json({
       success: false,
       message: error.message,
-      code: error.code,
-      command: error.command,
+      code: error.code || null,
     });
   }
 });
