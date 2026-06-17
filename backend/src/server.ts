@@ -9,8 +9,8 @@ app.use(express.json());
 
 const transporter = createTransport({
   host: "smtp.gmail.com",
-  port: 465,
-  secure: true,
+  port: 587,
+  secure: false,
   family: 4,
   auth: {
     user: "04sharadkumar@gmail.com",
